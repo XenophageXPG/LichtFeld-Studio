@@ -1,0 +1,215 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Eigenständiger Windows-Build für den eigenen Fork.
+# Kopiert den Build-Teil aus dem originalen nightly.yml und ersetzt den
+# Cloudflare-R2-Upload durch ein GitHub Release-Asset (kostenlos, öffentlich).
+
+name: Build Windows (Fork)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
+      VCPKG_BUILD_TYPE: release
+      CUDA_PATH: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8"
+      BUILD_DIR: b
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install CUDA 12.8
+        run: |
+          cd ..
+          Invoke-WebRequest https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe -OutFile cuda.exe -Verbose
+          Start-Process -FilePath .\cuda.exe -ArgumentList "-y -s -accepteula -toolkit -override -noDisplayDriver" -Wait
+
+      - name: Set CUDA environment
+        run: |
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CUDA_PATH_V12_8=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Normalize vcpkg path
+        run: '"VCPKG_ROOT=$([System.IO.Path]::GetFullPath($env:VCPKG_ROOT))" >> $env:GITHUB_ENV'
+
+      - name: Cache vcpkg tool
+        id: cache-vcpkg-tool
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-tool-${{ runner.os }}-2026-03-12
+          restore-keys: vcpkg-tool-${{ runner.os }}-
+
+      - name: Setup vcpkg
+        if: steps.cache-vcpkg-tool.outputs.cache-hit != 'true'
+        run: |
+          cd ..
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg_installed
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.BUILD_DIR }}/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
+          restore-keys: vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = $env:BUILD_DIR
+          $cmakeArgs = "-B $buildDir -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON -DBUILD_PYTHON_STUBS=OFF"
+          $retryablePatterns = @(
+            'status code 5\d\d',
+            'timed out',
+            'timeout',
+            'connection reset',
+            'failed to connect',
+            'temporarily unavailable',
+            'tls',
+            'ssl'
+          )
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Configure attempt $attempt/3"
+            cmd /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake $cmakeArgs"
+
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+
+            $shouldRetry = $false
+            $manifestLog = Join-Path $buildDir 'vcpkg-manifest-install.log'
+            if (Test-Path $manifestLog) {
+              foreach ($pattern in $retryablePatterns) {
+                if (Select-String -Path $manifestLog -Pattern $pattern -Quiet) {
+                  $shouldRetry = $true
+                  break
+                }
+              }
+            }
+
+            if (-not $shouldRetry -or $attempt -eq 3) {
+              exit $LASTEXITCODE
+            }
+
+            Write-Warning "Retryable configure failure detected, cleaning build tree before retry."
+            if (Test-Path $buildDir) {
+              Remove-Item -Recurse -Force $buildDir
+            }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+
+      - name: Generate shader headers for preflight
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PATH=%CD%\%BUILD_DIR%\vcpkg_installed\x64-windows\bin;%PATH%
+          cmake --build %BUILD_DIR% --target lfs_shader_headers --config Release -j 4
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build %BUILD_DIR% -j %NUMBER_OF_PROCESSORS%
+
+      - name: Dump failure diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $buildDir = $env:BUILD_DIR
+          $paths = @(
+            "$buildDir\vcpkg-manifest-install.log",
+            "$buildDir\vcpkg_installed\vcpkg\issue_body.md",
+            "$buildDir\CMakeFiles\CMakeConfigureLog.yaml",
+            "$buildDir\CMakeFiles\CMakeError.log",
+            "$buildDir\CMakeFiles\CMakeOutput.log",
+            "$buildDir\CMakeCache.txt"
+          )
+
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Write-Host "::group::$path"
+              Get-Content $path -Tail 400
+              Write-Host "::endgroup::"
+            }
+          }
+
+      - name: Package
+        id: package
+        shell: pwsh
+        env:
+          BUILD_CHANNEL: stable
+          STABLE_VERSION: 0.5.3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $date = Get-Date -AsUTC -Format "yyyy-MM-dd"
+          $dateStamp = Get-Date -AsUTC -Format "yyyyMMdd"
+          $builtAt = Get-Date -AsUTC -Format "yyyy-MM-ddTHH:mm:ssZ"
+          $shortSha = (git rev-parse --short HEAD).Trim()
+          $fullSha = (git rev-parse HEAD).Trim()
+
+          if ($env:STABLE_VERSION -notmatch '^[0-9]+(\.[0-9]+){1,2}$') {
+            throw "STABLE_VERSION must look like 0.5.3, got '$($env:STABLE_VERSION)'."
+          }
+
+          $packageVersion = "$($env:STABLE_VERSION).dev$dateStamp+$shortSha"
+          $packageName = "LichtFeld-Studio-windows-v$packageVersion.zip"
+          cmake --install $env:BUILD_DIR --prefix dist
+          Compress-Archive -Path dist\* -DestinationPath $packageName
+          $sha256 = (Get-FileHash -Algorithm SHA256 -Path $packageName).Hash.ToLowerInvariant()
+          Set-Content -Path "$packageName.sha256" -Value "$sha256  $packageName" -Encoding ascii
+
+          "build_channel=stable" >> $env:GITHUB_OUTPUT
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+          "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "full_sha=$fullSha" >> $env:GITHUB_OUTPUT
+          "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+
+      - name: Upload package as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: LichtFeld-Studio-windows-${{ steps.package.outputs.package_version }}
+          path: |
+            LichtFeld-Studio-windows-*.zip
+            LichtFeld-Studio-windows-*.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = '${{ steps.package.outputs.package_name }}'
+          $sha  = (Get-FileHash -Algorithm SHA256 -Path $name).Hash.ToLowerInvariant()
+          $body = @"
+          Built from commit `${{ steps.package.outputs.full_sha }}`
+          Built at: `${{ steps.package.outputs.built_at }}`
+          SHA256: `$sha`
+          "@
+
+          gh release upload $env:GITHUB_REF_NAME $name --clobber --notes "$body" || \
+          gh release create $env:GITHUB_REF_NAME $name --title "LichtFeld Studio $env:GITHUB_REF_NAME (fork build)" --notes "$body"
