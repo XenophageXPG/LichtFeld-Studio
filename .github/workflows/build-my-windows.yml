@@ -71,7 +71,10 @@ jobs:
         with:
           path: ${{ env.BUILD_DIR }}/vcpkg_installed
           key: vcpkg-installed-${{ runner.os }}-diag-v2-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
-          restore-keys: vcpkg-installed-${{ runner.os }}-diag-v2-, vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-, vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
+          restore-keys: |
+            vcpkg-installed-${{ runner.os }}-diag-v2-
+            vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-
+            vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
 
       - name: Configure
         shell: pwsh
