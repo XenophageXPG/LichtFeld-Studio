@@ -70,8 +70,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.BUILD_DIR }}/vcpkg_installed
-          key: vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
-          restore-keys: vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-
+          key: vcpkg-installed-${{ runner.os }}-diag-v2-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
+          restore-keys: vcpkg-installed-${{ runner.os }}-diag-v2-, vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-, vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
 
       - name: Configure
         shell: pwsh
@@ -118,6 +118,61 @@ jobs:
               Remove-Item -Recurse -Force $buildDir
             }
             Start-Sleep -Seconds (15 * $attempt)
+          }
+
+      - name: Dump RmlUi diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $diagOnly = "${{ vars.RMLUI_DIAG_ONLY }}"
+          $inc = "$env:BUILD_DIR/vcpkg_installed/x64-windows/include"
+          $cfg = "$env:BUILD_DIR/vcpkg_installed/x64-windows/share/RmlUi"
+
+          Write-Host "::group::RmlUi install layout"
+          foreach ($p in @(
+            "$inc/RmlUi/Core/ObserverPtr.h",
+            "$inc/RmlUi/Core/Header.h",
+            "$cfg/RmlUiConfig.cmake",
+            "$cfg/RmlUiTargets.cmake"
+          )) {
+            if (Test-Path $p) { Write-Host "PRESENT $p" } else { Write-Host "MISSING $p" }
+          }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::RMLUICORE_API definition as installed"
+          $hdr = "$inc/RmlUi/Core/Header.h"
+          if (Test-Path $hdr) {
+            Get-Content $hdr | Select-String -Pattern 'RMLUI_STATIC_LIB|RMLUICORE_API|dllimport|dllexport' -Context 1,1 |
+              Select-Object -First 40 | ForEach-Object { $_.ToString() }
+          }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::ObserverPtr.h as installed (class decl + RMLUICORE_API)"
+          $obs = "$inc/RmlUi/Core/ObserverPtr.h"
+          if (Test-Path $obs) {
+            Get-Content $obs | Select-String -Pattern 'RMLUICORE_API|class ObserverPtr|ObserverPtr\(\)|operator=' |
+              Select-Object -First 30 | ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" }
+          }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::RmlUi exported targets (type + link flags)"
+          foreach ($t in @("$cfg/RmlUiTargets.cmake", "$cfg/RmlUiConfig.cmake")) {
+            if (Test-Path $t) {
+              Write-Host "--- $t ---"
+              Get-Content $t | Select-String -Pattern 'add_library|INTERFACE_COMPILE_DEFINITIONS|INTERFACE_LINK_LIBRARIES|INTERFACE_INCLUDE_DIRECTORIES|STATIC|IMPORTED_LOCATION' |
+                Select-Object -First 60 | ForEach-Object { $_.Line.Trim() }
+            }
+          }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Any RmlUi libs present"
+          Get-ChildItem "$env:BUILD_DIR/vcpkg_installed/x64-windows/lib" -Filter '*mlui*' -ErrorAction SilentlyContinue |
+            ForEach-Object { "$($_.Name)  $([math]::Round($_.Length/1MB,2)) MB" }
+          Write-Host "::endgroup::"
+
+          if ($diagOnly -eq "1") {
+            Write-Host "RMLUI_DIAG_ONLY=1 - stopping after diagnostics, skipping the long build."
+            exit 0
           }
 
       - name: Generate shader headers for preflight
