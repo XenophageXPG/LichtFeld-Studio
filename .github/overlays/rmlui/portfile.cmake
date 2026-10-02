@@ -45,6 +45,30 @@ file(REMOVE_RECURSE
 )
 
 if(VCPKG_LIBRARY_LINKAGE STREQUAL "static")
+    # ObserverPtr<T> is declared as `class RMLUICORE_API ObserverPtr` (6.2) /
+    # `class RMLUICORE_API ObserverPtr<T>` (6.1), but its default constructor and
+    # copy assignment operator are defined inline in the header with no export
+    # annotation of their own. Under MSVC, marking a class __declspec(dllimport)
+    # applies the import attribute to every member function, including those
+    # inline definitions, so lfs_visualizer.dll expects import thunks for
+    # `ObserverPtr<T>::ObserverPtr()` and `ObserverPtr<T>::operator=(const
+    # ObserverPtr<T>&)`. The static RmlUi library never emits those thunks --
+    # only the rvalue overloads survive, because they are explicitly instantiated
+    # in ObserverPtr.cpp. Result: LNK2019/LNK1120 on three externals.
+    #
+    # Dropping the dllimport attribute from ObserverPtr (and only ObserverPtr)
+    # makes both sides agree on external linkage for a static build. This is the
+    # same approach already used below for the RMLUI_STATIC_LIB headers.
+    set(_rmlui_observer_header "${CURRENT_PACKAGES_DIR}/include/RmlUi/Core/ObserverPtr.h")
+    if(EXISTS "${_rmlui_observer_header}")
+        file(READ "${_rmlui_observer_header}" _rmlui_observer_content)
+        string(REGEX REPLACE
+            "class RMLUICORE_API ObserverPtr"
+            "class ObserverPtr"
+            _rmlui_observer_content "${_rmlui_observer_content}")
+        file(WRITE "${_rmlui_observer_header}" "${_rmlui_observer_content}")
+    endif()
+
     vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/include/RmlUi/Core/Header.h"
         "#if !defined RMLUI_STATIC_LIB"
         "#if 0"
