@@ -33,6 +33,7 @@ vcpkg_cmake_configure(
         "-DRMLUI_FONT_ENGINE=${RMLUI_FONT_ENGINE}"
         "-DRMLUI_COMPILER_OPTIONS=OFF"
         "-DRMLUI_INSTALL_RUNTIME_DEPENDENCIES=OFF"
+        "-DBUILD_SHARED_LIBS=OFF"
 )
 
 vcpkg_cmake_install()
@@ -44,7 +45,27 @@ file(REMOVE_RECURSE
     "${CURRENT_PACKAGES_DIR}/debug/share"
 )
 
-if(VCPKG_LIBRARY_LINKAGE STREQUAL "static")
+# BUILD_SHARED_LIBS=OFF above makes vcpkg build RmlUi statically, so the
+# exported RmlUiTargets.cmake must declare STATIC IMPORTED targets. Verify that
+# before touching the headers: if the export still says SHARED, the headers below
+# must keep their export annotations or the link will fail differently.
+set(_rmlui_share "${CURRENT_PACKAGES_DIR}/share/RmlUi")
+set(_rmlui_targets "${_rmlui_share}/RmlUiTargets.cmake")
+set(_rmlui_is_static FALSE)
+if(EXISTS "${_rmlui_targets}")
+    file(READ "${_rmlui_targets}" _rmlui_targets_content)
+    if(_rmlui_targets_content MATCHES "add_library\\(RmlUi::Core STATIC")
+        set(_rmlui_is_static TRUE)
+    elseif(_rmlui_targets_content MATCHES "add_library\\(RmlUi::Core SHARED")
+        message(FATAL_ERROR
+            "rmlui port: expected a STATIC RmlUi::Core export after BUILD_SHARED_LIBS=OFF, "
+            "but the generated export still declares it SHARED. The installed package would "
+            "make consumers compile against dllimport while linking a static archive, which "
+            "is the LNK2019/LNK1120 failure this port is meant to avoid.")
+    endif()
+endif()
+
+if(_rmlui_is_static)
     # ObserverPtr<T> is declared as `class RMLUICORE_API ObserverPtr` (6.2) /
     # `class RMLUICORE_API ObserverPtr<T>` (6.1), but its default constructor and
     # copy assignment operator are defined inline in the header with no export
