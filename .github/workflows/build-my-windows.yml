@@ -26,6 +26,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
       VCPKG_BUILD_TYPE: release
       CUDA_PATH: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8"
+      BUILD_DIR: b
 
     steps:
       - name: Checkout source
@@ -68,10 +69,10 @@ jobs:
       - name: Cache vcpkg_installed
         uses: actions/cache@v6
         with:
-          path: build-windows-release/vcpkg_installed
-          key: vcpkg-installed-${{ runner.os }}-preset-v4-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
+          path: ${{ env.BUILD_DIR }}/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-doc-cmds-v5-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
           restore-keys: |
-            vcpkg-installed-${{ runner.os }}-preset-v4-
+            vcpkg-installed-${{ runner.os }}-doc-cmds-v5-
             vcpkg-installed-${{ runner.os }}-fork-obsfix-v1-
             vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
 
@@ -95,14 +96,14 @@ jobs:
 
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             Write-Host "Configure attempt $attempt/3"
-            cmd /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake --preset windows-release -DBUILD_PORTABLE=ON -DBUILD_PYTHON_STUBS=OFF"
+            cmd /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B $env:BUILD_DIR -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON -DBUILD_PYTHON_STUBS=OFF"
 
             if ($LASTEXITCODE -eq 0) {
               exit 0
             }
 
             $shouldRetry = $false
-            foreach ($log in @("build-windows-release/vcpkg-manifest-install.log")) {
+            foreach ($log in @("$env:BUILD_DIR/vcpkg-manifest-install.log")) {
               if (Test-Path $log) {
                 foreach ($pattern in $retryablePatterns) {
                   if (Select-String -Path $log -Pattern $pattern -Quiet) {
@@ -119,7 +120,7 @@ jobs:
 
             Write-Warning "Retryable configure failure detected, cleaning build tree before retry."
             if (Test-Path "build-windows-release") {
-              Remove-Item -Recurse -Force "build-windows-release"
+              Remove-Item -Recurse -Force $env:BUILD_DIR
             }
             Start-Sleep -Seconds (15 * $attempt)
           }
@@ -129,8 +130,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $diagOnly = "${{ vars.RMLUI_DIAG_ONLY }}"
-          $inc = "build-windows-release/vcpkg_installed/x64-windows/include"
-          $cfg = "build-windows-release/vcpkg_installed/x64-windows/share/RmlUi"
+          $inc = "${{ env.BUILD_DIR }}/vcpkg_installed/x64-windows/include"
+          $cfg = "${{ env.BUILD_DIR }}/vcpkg_installed/x64-windows/share/RmlUi"
 
           Write-Host "::group::RmlUi install layout"
           foreach ($p in @(
@@ -170,7 +171,7 @@ jobs:
           Write-Host "::endgroup::"
 
           Write-Host "::group::Any RmlUi libs present"
-          Get-ChildItem "build-windows-release/vcpkg_installed/x64-windows/lib" -Filter '*mlui*' -ErrorAction SilentlyContinue |
+          Get-ChildItem "${{ env.BUILD_DIR }}/vcpkg_installed/x64-windows/lib" -Filter '*mlui*' -ErrorAction SilentlyContinue |
             ForEach-Object { "$($_.Name)  $([math]::Round($_.Length/1MB,2)) MB" }
           Write-Host "::endgroup::"
 
@@ -183,14 +184,14 @@ jobs:
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          set PATH=%CD%\build-windows-release\vcpkg_installed\x64-windows\bin;%PATH%
-          cmake --build --preset windows-release --target lfs_shader_headers -j 4
+          set PATH=%CD%\%BUILD_DIR%\vcpkg_installed\x64-windows\bin;%PATH%
+          cmake --build %BUILD_DIR% --target lfs_shader_headers -j 4
 
       - name: Build
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cmake --build --preset windows-release -j %NUMBER_OF_PROCESSORS%
+          cmake --build %BUILD_DIR% -j %NUMBER_OF_PROCESSORS%
 
       - name: Dump failure diagnostics
         if: failure()
@@ -199,10 +200,10 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $paths = @(
             "build-windows-release\vcpkg-manifest-install.log",
-            "build-windows-release\vcpkg_installed\vcpkg\issue_body.md",
-            "build-windows-release\CMakeFiles\CMakeConfigureLog.yaml",
-            "build-windows-release\CMakeFiles\CMakeError.log",
-            "build-windows-release\CMakeFiles\CMakeOutput.log",
+            "$env:BUILD_DIR\vcpkg_installed\vcpkg\issue_body.md",
+            "$buildDir\CMakeFiles\CMakeConfigureLog.yaml",
+            "$buildDir\CMakeFiles\CMakeError.log",
+            "$buildDir\CMakeFiles\CMakeOutput.log",
             "build-windows-release\CMakeCache.txt"
           )
 
@@ -234,7 +235,7 @@ jobs:
 
           $packageVersion = "$($env:STABLE_VERSION).dev$dateStamp+$shortSha"
           $packageName = "LichtFeld-Studio-windows-v$packageVersion.zip"
-          cmake --install build-windows-release --prefix dist
+          cmake --install $env:BUILD_DIR --prefix dist
           Compress-Archive -Path dist\* -DestinationPath $packageName
           $sha256 = (Get-FileHash -Algorithm SHA256 -Path $packageName).Hash.ToLowerInvariant()
           Set-Content -Path "$packageName.sha256" -Value "$sha256  $packageName" -Encoding ascii
